@@ -1294,6 +1294,8 @@ export class ManagedWorktreeService {
         return await this.remove({
           ...guard,
           ...params,
+          reason: "run-end",
+          requireLossless: true,
           runEndCleanup: { outcome: "removed-lossless", at: this.now() },
         });
       },
@@ -1423,7 +1425,7 @@ export class ManagedWorktreeService {
           result.removed.push(record.id);
         }
       } catch (error) {
-        await onError("idle", record, error, retiredOwner);
+        await onError(record, error, retiredOwner);
       } finally {
         await params.checkpoint?.(result);
       }

@@ -87,7 +87,6 @@ const MODEL_REMAINING_PERCENT_KEYS = [
   ...CURRENT_INTERVAL_REMAINING_PERCENT_KEYS,
   ...CURRENT_WEEKLY_REMAINING_PERCENT_KEYS,
 ] as const;
-const NO_USAGE_KEYS = [] as const;
 
 const USED_KEYS = [
   "used",
@@ -317,38 +316,10 @@ function deriveWindowLabel(payload: Record<string, unknown>): string {
   return deriveWindowLabelFromTimestamps(payload) ?? "5h";
 }
 
-function deriveUsedPercent(
-  payload: Record<string, unknown>,
-  keys: {
-    total?: readonly string[];
-    used?: readonly string[];
-    remaining?: readonly string[];
-    percent?: readonly string[];
-    remainingPercent?: readonly string[];
-    remainingPercentUnit?: "percent" | "ratio-or-percent";
-    preferRemainingPercent?: boolean;
-  } = {},
-): number | null {
-  const remainingPercentRaw = pickNumber(payload, keys.remainingPercent ?? REMAINING_PERCENT_KEYS);
-  const remainingPercentUnit = keys.remainingPercentUnit ?? "ratio-or-percent";
-  const fromRemainingPercent =
-    remainingPercentRaw === undefined
-      ? null
-      : clampPercent(
-          100 -
-            clampPercent(
-              remainingPercentUnit === "ratio-or-percent" && remainingPercentRaw <= 1
-                ? remainingPercentRaw * 100
-                : remainingPercentRaw,
-            ),
-        );
-  if (keys.preferRemainingPercent === true && fromRemainingPercent !== null) {
-    return fromRemainingPercent;
-  }
-
-  const total = pickNumber(payload, keys.total ?? TOTAL_KEYS);
-  let used = pickNumber(payload, keys.used ?? USED_KEYS);
-  const remaining = pickNumber(payload, keys.remaining ?? REMAINING_KEYS);
+function deriveUsedPercent(payload: Record<string, unknown>): number | null {
+  const total = pickNumber(payload, TOTAL_KEYS);
+  let used = pickNumber(payload, USED_KEYS);
+  const remaining = pickNumber(payload, REMAINING_KEYS);
   if (used === undefined && remaining !== undefined && total !== undefined) {
     used = total - remaining;
   }
@@ -363,14 +334,18 @@ function deriveUsedPercent(
     return fromCounts;
   }
 
-  const percentRaw = pickNumber(payload, keys.percent ?? PERCENT_KEYS);
+  const percentRaw = pickNumber(payload, PERCENT_KEYS);
   if (percentRaw !== undefined) {
     return clampPercent(percentRaw <= 1 ? percentRaw * 100 : percentRaw);
   }
 
   // usage_percent / usagePercent in MiniMax's API represents remaining quota,
   // not consumed quota. Invert to get usedPercent.
-  return fromRemainingPercent;
+  const remainingPercentRaw = pickNumber(payload, REMAINING_PERCENT_KEYS);
+  return remainingPercentRaw === undefined
+    ? null
+    : 100 -
+        clampPercent(remainingPercentRaw <= 1 ? remainingPercentRaw * 100 : remainingPercentRaw);
 }
 
 function hasModelUsageEvidence(record: Record<string, unknown>): boolean {
@@ -439,13 +414,16 @@ function deriveMinimaxModelWindows(record: Record<string, unknown>): {
       reset: ["weekly_end_time", "weeklyEndTime"],
     },
   ]) {
-    const usedPercent = deriveUsedPercent(record, {
-      ...window,
-      used: NO_USAGE_KEYS,
-      percent: NO_USAGE_KEYS,
-      remainingPercentUnit: "percent",
-      preferRemainingPercent: true,
-    });
+    const remainingPercent = pickNumber(record, window.remainingPercent);
+    const total = pickNumber(record, window.total);
+    const remaining = pickNumber(record, window.remaining);
+    const used = total !== undefined && remaining !== undefined ? total - remaining : undefined;
+    const usedPercent =
+      remainingPercent !== undefined
+        ? 100 - clampPercent(remainingPercent)
+        : total && total > 0 && used !== undefined && Number.isFinite(used)
+          ? clampPercent((used / total) * 100)
+          : null;
     if (usedPercent === null) {
       continue;
     }

@@ -26,9 +26,14 @@ import {
 } from "../../channels/turn/agent-run-terminal-outcome.js";
 import { agentCommandFromGatewayIngress } from "../../commands/agent.js";
 import { isAbortError } from "../../infra/abort-signal.js";
-import { clearAgentRunContext } from "../../infra/agent-run-registry.js";
+import { isAgentEventLifecycleGenerationCurrent } from "../../infra/agent-events.js";
+import {
+  clearAgentRunContext,
+  validateAgentRunDelegatedAuthority,
+} from "../../infra/agent-run-registry.js";
 import { formatErrorMessage, toErrorObject } from "../../infra/errors.js";
 import { completeUserTurnProcessing } from "../../sessions/user-turn-transcript-processing.js";
+import { createDeferredCore } from "../../shared/deferred.js";
 import type { ChatAbortControllerEntry } from "../chat-abort.js";
 import { errorShapeFromError } from "../error-shape.js";
 import type { GatewayCronCreatorAuthorityAdmission } from "../server-methods/cron-creator-authority-admission.js";
@@ -44,7 +49,6 @@ import {
   resolveGatewayAgentAbortStopReason,
   resolveResolvedAgentTimeoutStopReason,
 } from "./agent-run-dispatch-outcome.js";
-import { bindGatewayAgentTerminalProducer } from "./agent-run-terminal-producer.js";
 import type { AgentTurnContext, AgentTurnIo } from "./types.js";
 
 export function dispatchAgentRunFromGateway(params: {
@@ -185,16 +189,65 @@ export function dispatchAgentRunFromGateway(params: {
   if (cronCreatorAuthorityCapability) {
     params.cronCreatorAuthority?.bindRunScope?.(cronCreatorAuthorityCapability);
   }
-  const terminalProducer = bindGatewayAgentTerminalProducer({
-    runId: params.runId,
-    entry: registeredRunEntry,
-    controller: params.abortController,
-    ingressOpts: params.ingressOpts,
-    chatAbortControllers: params.context.chatAbortControllers,
-    isOwnerReleased: () => runOwnerCleanedUp,
-  });
+  const producerRunInstance = registeredRunEntry?.operationalRunInstance;
+  const producerLifecycleGeneration = registeredRunEntry?.lifecycleGeneration;
+  const producerSessionKey = registeredRunEntry?.sessionKey;
+  const producerCompletion = createDeferredCore();
+  let terminalSettlement: Promise<void> | undefined;
+  if (registeredRunEntry && params.ingressOpts.abortSignal === params.abortController.signal) {
+    registeredRunEntry.resolveTerminalProducer = () => {
+      const { sessionId, sessionKey } = registeredRunEntry;
+      const isCurrent = () => {
+        const authority = registeredRunEntry.agentRunDelegatedAuthority;
+        return (
+          !runOwnerCleanedUp &&
+          !params.abortController.signal.aborted &&
+          params.ingressOpts.abortSignal === params.abortController.signal &&
+          params.context.chatAbortControllers.get(params.runId) === registeredRunEntry &&
+          registeredRunEntry.controller === params.abortController &&
+          registeredRunEntry.operationalRunInstance === producerRunInstance &&
+          registeredRunEntry.lifecycleGeneration === producerLifecycleGeneration &&
+          registeredRunEntry.sessionId === sessionId &&
+          registeredRunEntry.sessionKey === sessionKey &&
+          sessionKey === producerSessionKey &&
+          !registeredRunEntry.registrationCleanupRequested &&
+          (!producerLifecycleGeneration ||
+            isAgentEventLifecycleGenerationCurrent(producerLifecycleGeneration)) &&
+          (!registeredRunEntry.executionStarted || authority !== undefined) &&
+          (!authority ||
+            (authority.operationalRunInstance === producerRunInstance &&
+              validateAgentRunDelegatedAuthority(authority)))
+        );
+      };
+      if (!isCurrent()) {
+        return undefined;
+      }
+      return {
+        sessionId,
+        sessionKey,
+        handoff: (settle) => {
+          if (!isCurrent()) {
+            return false;
+          }
+          const settlement = settle(producerCompletion.promise);
+          terminalSettlement = terminalSettlement
+            ? Promise.all([terminalSettlement, settlement]).then(() => undefined)
+            : settlement;
+          return true;
+        },
+      };
+    };
+  }
+  const completeTerminalProducer = async () => {
+    producerCompletion.resolve();
+    let joined: Promise<void> | undefined;
+    do {
+      joined = terminalSettlement;
+      await joined;
+    } while (joined !== terminalSettlement);
+  };
   const ingressOptsWithSpawnFacts = withAgentCommandExecutionIdentitySpawnFacts(
-    { ...params.ingressOpts, beforeTerminalDelivery: terminalProducer.complete },
+    { ...params.ingressOpts, beforeTerminalDelivery: completeTerminalProducer },
     readAgentRunDispatchExecutionIdentity(params),
   );
   const activateAgent = () => {
@@ -244,7 +297,7 @@ export function dispatchAgentRunFromGateway(params: {
       )
     : runAgent();
   // Startup failures may never enter command finalization; delivery already joined this boundary.
-  const agentRun = terminalProducer.settle(agentExecution);
+  const agentRun = agentExecution.finally(completeTerminalProducer);
   let inputCompletionWriteFailed = false;
   const dispatchCompletion = agentRun
     .then(async (result) => {

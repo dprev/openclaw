@@ -218,15 +218,10 @@ function resolveScopedGlobalNpmrc(scope: NpmConfigScope): string | null {
   return prefix ? path.join(prefix, "etc", "npmrc") : null;
 }
 
-function resolveNpmConfigFiles(
-  env: NodeJS.ProcessEnv,
-  scope: NpmConfigScope = {},
-  userNpmrc = resolveEnvPath(env, "NPM_CONFIG_USERCONFIG", "npm_config_userconfig") ??
-    resolveHomeNpmrc(env),
-): string[] {
+function resolveNpmConfigFiles(env: NodeJS.ProcessEnv, scope: NpmConfigScope): string[] {
   const files = [
     resolveScopedProjectNpmrc(scope),
-    userNpmrc,
+    resolveEnvPath(env, "NPM_CONFIG_USERCONFIG", "npm_config_userconfig") ?? resolveHomeNpmrc(env),
     resolveEnvPath(env, "NPM_CONFIG_GLOBALCONFIG", "npm_config_globalconfig"),
     resolveScopedGlobalNpmrc(scope),
     readNpmGlobalConfigPath(env, scope),

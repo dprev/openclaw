@@ -24,7 +24,6 @@ export function normalizeProviderSpecificConfig(
   return (
     normalizeProviderConfigWithPlugin({
       provider: runtimeProviderKey,
-      allowRuntimePluginLoad: false,
       ...(manifestRegistry ? { manifestRegistry } : {}),
       context: {
         provider: providerKey,
@@ -44,7 +43,6 @@ export function resolveProviderConfigApiKeyResolver(
   return (env) =>
     resolveProviderConfigApiKeyWithPlugin({
       provider: runtimeProviderKey,
-      allowRuntimePluginLoad: false,
       ...(manifestRegistry ? { manifestRegistry } : {}),
       context: {
         provider: providerKey,

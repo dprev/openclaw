@@ -13,11 +13,10 @@ import { resolveInstallWorkTimeoutMs } from "./install-mode-options.js";
 import type { NpmSpecResolution } from "./install-source-utils.js";
 import { JsonFileReadError, readJson, readJsonIfExists, writeJson } from "./json-files.js";
 import { resolveNpmCommand } from "./npm-command.js";
-import { createManagedNpmPeerPlanArgs } from "./npm-managed-peer-plan.js";
 import type { ParsedRegistryNpmSpec } from "./npm-registry-spec.js";
 import { resolveOpenClawPackageRootSync } from "./openclaw-root.js";
 import { isPackageDependencyName } from "./package-json.js";
-import { createSafeNpmInstallEnv } from "./safe-package-install.js";
+import { createSafeNpmInstallArgs, createSafeNpmInstallEnv } from "./safe-package-install.js";
 import { UPDATE_NETWORK_TIMEOUT_MS } from "./update-network-budget.js";
 
 // Managed npm roots are private package roots used for installed plugins. This
@@ -274,7 +273,6 @@ function applyManagedNpmRootOverrides(params: {
 
 /** Read host OpenClaw pnpm overrides for reuse inside a managed npm root. */
 export async function readOpenClawManagedNpmRootOverrides(params?: {
-  argv1?: string;
   cwd?: string;
   moduleUrl?: string;
   packageRoot?: string | null;
@@ -282,7 +280,7 @@ export async function readOpenClawManagedNpmRootOverrides(params?: {
   const packageRoot =
     params?.packageRoot ??
     resolveOpenClawPackageRootSync({
-      argv1: params?.argv1 ?? process.argv[1],
+      argv1: process.argv[1],
       moduleUrl: params?.moduleUrl ?? import.meta.url,
       cwd: params?.cwd ?? process.cwd(),
     });
@@ -755,21 +753,35 @@ async function collectNpmResolvedManagedNpmRootPeerDependencyPins(params: {
 
     const command = params.runCommand ?? runCommandWithTimeout;
     const runPeerPlan = (legacyPeerDeps: boolean) =>
-      command(createManagedNpmPeerPlanArgs({ force: true, legacyPeerDeps }), {
-        cwd: tempRoot,
-        timeoutMs: resolveInstallWorkTimeoutMs(
-          params.workTimeoutMs,
-          params.timeoutMs ?? UPDATE_NETWORK_TIMEOUT_MS,
-        ),
-        signal: params.signal,
-        killProcessTree: true,
-        env: createSafeNpmInstallEnv(process.env, {
-          legacyPeerDeps,
-          npmConfigCwd: tempRoot,
-          packageLock: true,
-          quiet: true,
-        }),
-      });
+      command(
+        resolveNpmCommand([
+          "install",
+          "--package-lock-only",
+          "--force",
+          ...createSafeNpmInstallArgs({
+            omitPeer: true,
+            legacyPeerDeps,
+            ignoreWorkspaces: true,
+            noAudit: true,
+            noFund: true,
+          }).slice(1),
+        ]),
+        {
+          cwd: tempRoot,
+          timeoutMs: resolveInstallWorkTimeoutMs(
+            params.workTimeoutMs,
+            params.timeoutMs ?? UPDATE_NETWORK_TIMEOUT_MS,
+          ),
+          signal: params.signal,
+          killProcessTree: true,
+          env: createSafeNpmInstallEnv(process.env, {
+            legacyPeerDeps,
+            npmConfigCwd: tempRoot,
+            packageLock: true,
+            quiet: true,
+          }),
+        },
+      );
     let result = await runPeerPlan(false);
     if (result.code !== 0 && isHostPeerResolutionFailure(result)) {
       result = await runPeerPlan(true);
