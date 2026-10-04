@@ -46,8 +46,15 @@ type Operations = {
 export type WorkboardSessionsBoardService = OpenClawPluginService &
   Operations & { stop: () => Promise<void> };
 type Owner = Operations & { cancel: () => void; stop: () => Promise<void> };
-type CachedFacts = { sessionId: string; facts?: WorkboardSessionFacts; dirty: boolean };
+type CachedFacts = {
+  sessionId: string;
+  facts?: WorkboardSessionFacts;
+  dirty: boolean;
+  prRetry?: { at: number; delayMs: number; stale: boolean };
+};
 const FACTS_BATCH_SIZE = 40;
+const FACTS_PR_RETRY_MS = 60_000;
+const FACTS_PR_RETRY_MAX_MS = 15 * 60_000;
 
 function activeState() {
   return resolveGlobalSingleton<{ owner?: Owner }>(
@@ -219,7 +226,10 @@ function createOwner(
       const cached = cache.get(row.key);
       return (
         row.key !== board.sessions.agentSessionKey &&
-        (!cached || cached.sessionId !== row.sessionId || cached.dirty)
+        (!cached ||
+          cached.sessionId !== row.sessionId ||
+          cached.dirty ||
+          (cached.prRetry !== undefined && cached.prRetry.at <= now()))
       );
     });
     const refresh = async () => {
@@ -245,7 +255,35 @@ function createOwner(
                 cache.delete(row.key);
               }
             } else if (cache.get(row.key) === before.get(row.key)) {
-              cache.set(row.key, { sessionId: facts.sessionId, facts, dirty: false });
+              const cached = before.get(row.key);
+              const previous =
+                cached?.facts?.lifecycleRevision === facts.lifecycleRevision ? cached : undefined;
+              let prRetry: CachedFacts["prRetry"];
+              if (facts.pullRequestsUnavailable || facts.pullRequestsRateLimited) {
+                const retry = previous?.prRetry;
+                const delayMs = retry
+                  ? Math.min(retry.delayMs * 2, FACTS_PR_RETRY_MAX_MS)
+                  : FACTS_PR_RETRY_MS;
+                prRetry = {
+                  // Session changes still refresh run/health without advancing the PR backoff.
+                  ...(retry && retry.at > now() ? retry : { at: now() + delayMs, delayMs }),
+                  stale: Boolean(
+                    previous?.facts &&
+                    (previous.prRetry?.stale ||
+                      (!previous.facts.pullRequestsUnavailable &&
+                        !previous.facts.pullRequestsRateLimited)),
+                  ),
+                };
+              }
+              cache.set(row.key, {
+                sessionId: facts.sessionId,
+                facts:
+                  prRetry?.stale && previous?.facts
+                    ? { ...facts, pullRequests: previous.facts.pullRequests }
+                    : facts,
+                dirty: false,
+                prRetry,
+              });
             }
           }
         } catch (error) {
@@ -274,6 +312,7 @@ function createOwner(
     assertReadCurrent();
     const fallback = sessionsBoardFallback(board);
     const sessions: WorkboardSessionsBoardRead["sessions"] = [];
+    const prWarnings = new Map<string, number>();
     for (const row of roster.values()) {
       if (omitted.has(row.key)) {
         continue;
@@ -284,12 +323,22 @@ function createOwner(
       if (!inScope(facts, board, now())) {
         continue;
       }
+      if (facts.pullRequestsUnavailable || facts.pullRequestsRateLimited) {
+        const availability = cached?.prRetry?.stale ? "stale" : "not loaded yet";
+        const reason = `${availability}${facts.pullRequestsRateLimited ? " (GitHub rate limited)" : ""}`;
+        prWarnings.set(reason, (prWarnings.get(reason) ?? 0) + 1);
+      }
       const pin = placements.get(row.key);
       const pinned =
         pin?.source === "operator" &&
         board.sessions.columns.some((column) => column.id === pin.columnId);
+      // Keep availability visible to callers while rules use the last confirmed PR list.
+      const ruleFacts =
+        facts.pullRequestsUnavailable || facts.pullRequestsRateLimited
+          ? { ...facts, pullRequestsUnavailable: !cached?.prRetry?.stale }
+          : facts;
       const match = known
-        ? board.sessions.columns.find((column) => sessionMatchesColumn(facts, column))
+        ? board.sessions.columns.find((column) => sessionMatchesColumn(ruleFacts, column))
         : undefined;
       sessions.push({
         ...facts,
@@ -297,7 +346,7 @@ function createOwner(
         source: pinned ? "operator" : "state",
         reason: pinned
           ? pin.reason
-          : !known || (!match && facts.pullRequestsUnavailable)
+          : !known || (!match && ruleFacts.pullRequestsUnavailable)
             ? "facts-unavailable"
             : match
               ? "Matched column rules"
@@ -315,9 +364,9 @@ function createOwner(
     } else {
       factsFailureLogged = false;
     }
-    if (sessions.some((session) => session.pullRequestsUnavailable)) {
+    for (const [reason, count] of prWarnings) {
       warnings.push(
-        "Some pull-request information is unavailable. The board updates when background facts are ready.",
+        `Pull-request facts for ${count} ${count === 1 ? "session" : "sessions"} are ${reason}.`,
       );
     }
     return {
