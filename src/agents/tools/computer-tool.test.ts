@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { runWithAgentToolExecutionContext } from "../../../packages/agent-core/src/tool-execution-context.js";
+import { makeAssistantMessageFixture } from "../test-helpers/assistant-message-fixtures.js";
 import {
   callGatewayToolMock,
   COMPUTER_ACT_COMMAND,
@@ -364,8 +366,39 @@ describe("createComputerTool v1 execution", () => {
 
     const actKeys = computerActBodies().map((body) => body.idempotencyKey);
     expect(actKeys).toHaveLength(2);
-    expect(actKeys[0]).toMatch(/^computer\.act:v1:[0-9a-f]{64}$/);
+    expect(actKeys[0]).toMatch(/^computer\.act:v2:[0-9a-f]{64}$/);
     expect(actKeys[1]).toBe(actKeys[0]);
+  });
+
+  it("keeps queued calls distinct across assistant responses while preserving replay keys", async () => {
+    const tool = createVisionComputerTool({ idempotencyScope: "run-1" });
+    await Promise.all(
+      ["response-1", "response-2", "response-1"].map((responseId) => {
+        const input = { action: "type", text: responseId };
+        const toolCall = {
+          type: "toolCall" as const,
+          id: "computer_0",
+          name: "computer",
+          arguments: input,
+        };
+        return runWithAgentToolExecutionContext(
+          {
+            assistantMessage: makeAssistantMessageFixture({
+              responseId,
+              content: [toolCall],
+              stopReason: "toolUse",
+            }),
+            toolCall,
+          },
+          () => tool.execute(toolCall.id, input),
+        );
+      }),
+    );
+
+    const actKeys = computerActBodies().map((body) => body.idempotencyKey);
+    expect(actKeys).toHaveLength(3);
+    expect(actKeys[1]).not.toBe(actKeys[0]);
+    expect(actKeys[2]).toBe(actKeys[0]);
   });
 
   it("does not share node receipts across runs that reuse a tool call id", async () => {
