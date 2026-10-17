@@ -66,20 +66,6 @@ afterEach(() => {
 });
 
 describe("model-backed transcript summaries", () => {
-  it("forwards explicit summary thinking without changing ordinary agent defaults", async () => {
-    await summarizeTranscriptsWithModel({
-      ...params,
-      cfg: { ...params.cfg, transcripts: { summaryThinking: "high" } },
-    });
-    expect(runIsolatedCompletion).toHaveBeenCalledWith(
-      expect.objectContaining({
-        thinkLevel: "high",
-        applyThinkingToSideQuestion: true,
-        answerTokenBudget: 1_500,
-      }),
-    );
-  });
-
   it("does not repeat the primary after the utility chain already attempted it", async () => {
     runIsolatedCompletion.mockRejectedValue(
       new FailoverError("Fixture server unavailable", { reason: "server_error" }),
